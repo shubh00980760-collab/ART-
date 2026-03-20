@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DrawMail — Send Art, Not Just Words</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+
+  <!-- React + ReactDOM + Babel standalone (no build step needed) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+  <style>
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+    html, body { height:100%; font-family:'DM Sans',sans-serif; overflow-x:hidden; }
+    #root { height:100%; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- type="text/babel" tells Babel to compile this JSX before running it -->
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useCallback } = React;
+
+    const uid = () => Math.random().toString(36).slice(2, 9);
+
+    const G = {
+      ink:"#1a1118", paper:"#f5f0e8", cream:"#ede7d9",
+      rust:"#c0472b", gold:"#c9963a", sage:"#5a7a5e",
+      muted:"#8a7f72", canvasBg:"#faf7f2",
+    };
+
+    /* ══════════════════════════════════════════
+       SUPABASE
+    ══════════════════════════════════════════ */
+    const SUPABASE_URL = "https://krvvkulyxmxvbzemufgp.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtydnZrdWx5eG14dmJ6ZW11ZmdwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwMzE4NjMsImV4cCI6MjA4OTYwNzg2M30.c-jqjlM2uj0M7HvwxMx3GCgBUm0NizDRhl2-r6MsUDw";
+    const SB = {
+      "Content-Type":"application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+    };
+
+    async function saveArt(payload) {
+      const id = uid();
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/artworks`, {
+        method:"POST",
+        headers:{ ...SB, "Prefer":"return=minimal" },
+        body: JSON.stringify({ id, to_name:payload.to, from_name:payload.from, message:payload.msg, image_data:payload.img }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return id;
+    }
+
+    async function loadArt(id) {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/artworks?id=eq.${id}&select=*`, { headers:SB });
+      if (!res.ok) throw new Error("Fetch failed");
+      const rows = await res.json();
+      if (!rows.length) return null;
+      const r = rows[0];
+      return { to:r.to_name, from:r.from_name, msg:r.message, img:r.image_data };
+    }
+
+    /* ══════════════════════════════════════════
+       DRAWING HOOK
+    ══════════════════════════════════════════ */
+    function useDrawing(canvasRef) {
+      const st = useRef({ tool:"pen", color:"#1a1118", size:4, drawing:false, sx:0, sy:0, snapshots:[], penSnap:null });
+
+      const getPos = useCallback((e) => {
+        const c = canvasRef.current, r = c.getBoundingClientRect();
+        const src = e.touches ? e.touches[0] : e;
+        return { x:(src.clientX-r.left)*(c.width/r.width), y:(src.clientY-r.top)*(c.height/r.height) };
+      }, [canvasRef]);
+
+      const snap = useCallback(() => {
+        const c = canvasRef.current, s = st.current;
+        s.snapshots.push(c.getContext("2d").getImageData(0,0,c.width,c.height));
+        if (s.snapshots.length > 50) s.snapshots.shift();
+      }, [canvasRef]);
+
+      const initCanvas = useCallback(() => {
+        const c = canvasRef.current; if (!c) return;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = G.canvasBg; ctx.fillRect(0,0,c.width,c.height); snap();
+      }, [canvasRef, snap]);
+
+      const undo = useCallback(() => {
+        const c = canvasRef.current, s = st.current;
+        if (s.snapshots.length > 1) { s.snapshots.pop(); c.getContext("2d").putImageData(s.snapshots[s.snapshots.length-1],0,0); }
+      }, [canvasRef]);
+
+      const clear = useCallback(() => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        ctx.fillStyle = G.canvasBg; ctx.fillRect(0,0,c.width,c.height); snap();
+      }, [canvasRef, snap]);
+
+      const addImage = useCallback((file) => {
+        const c = canvasRef.current, ctx = c.getContext("2d");
+        const reader = new FileReader();
+        reader.onload = e => {
+          const img = new Image();
+          img.onload = () => {
+            const mW=c.width*.6, mH=c.height*.6;
+            let w=img.width, h=img.height;
+            if (w>mW){h*=mW/w;w=mW;} if(h>mH){w*=mH/h;h=mH;}
+            ctx.drawImage(img,(c.width-w)/2,(c.height-h)/2,w,h); snap();
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      }, [canvasRef, snap]);
+
+      const onDown = useCallback((e) => {
+        const c=canvasRef.current, ctx=c.getContext("2d"), s=st.current;
+        s.drawing=true; const p=getPos(e); s.sx=p.x; s.sy=p.y;
+        s.penSnap=ctx.getImageData(0,0,c.width,c.height);
+        if(s.tool==="pen"||s.tool==="eraser"){ctx.beginPath();ctx.moveTo(s.sx,s.sy);}
+      }, [canvasRef, getPos]);
+
+      const onMove = useCallback((e) => {
+        const c=canvasRef.current, ctx=c.getContext("2d"), s=st.current;
+        if (!s.drawing) return;
+        const p=getPos(e);
+        ctx.globalCompositeOperation="source-over";
+        if (s.tool==="pen") {
+          ctx.strokeStyle=s.color; ctx.lineWidth=s.size; ctx.lineCap=ctx.lineJoin="round";
+          ctx.lineTo(p.x,p.y); ctx.stroke();
+        } else if (s.tool==="eraser") {
+          ctx.strokeStyle=G.canvasBg; ctx.lineWidth=s.size*3; ctx.lineCap=ctx.lineJoin="round";
+          ctx.lineTo(p.x,p.y); ctx.stroke();
+        } else if (s.tool==="rect"||s.tool==="circle") {
+          ctx.putImageData(s.penSnap,0,0);
+          ctx.strokeStyle=s.color; ctx.lineWidth=s.size; ctx.lineCap="round";
+          if (s.tool==="rect") {
+            ctx.beginPath(); ctx.rect(s.sx,s.sy,p.x-s.sx,p.y-s.sy); ctx.stroke();
+          } else {
+            const rx=Math.abs(p.x-s.sx)/2, ry=Math.abs(p.y-s.sy)/2;
+            ctx.beginPath(); ctx.ellipse(s.sx+(p.x-s.sx)/2,s.sy+(p.y-s.sy)/2,rx||1,ry||1,0,0,Math.PI*2); ctx.stroke();
+          }
+        }
+      }, [canvasRef, getPos]);
+
+      const onUp = useCallback(() => {
+        const s=st.current; if(!s.drawing) return;
+        s.drawing=false; canvasRef.current.getContext("2d").beginPath(); snap();
+      }, [canvasRef, snap]);
+
+      const setTool  = (t) => { st.current.tool  = t; };
+      const setColor = (c) => { st.current.color = c; };
+      const setSize  = (n) => { st.current.size  = n; };
+
+      return { initCanvas, undo, clear, addImage, onDown, onMove, onUp, setTool, setColor, setSize };
+    }
+
+    /* ══════════════════════════════════════════
+       APP ROOT — handles routing
+    ══════════════════════════════════════════ */
+    function App() {
+      const params = new URLSearchParams(window.location.search);
+      const viewId = params.get("id");
+      return viewId ? <ViewPage artId={viewId}/> : <EditorPage/>;
+    }
+
+    /* ══════════════════════════════════════════
+       EDITOR PAGE
+    ══════════════════════════════════════════ */
+    function EditorPage() {
+      const [screen, setScreen] = useState("landing");
+      const [tool,   setToolSt] = useState("pen");
+      const [color,  setColorSt]= useState("#1a1118");
+      const [size,   setSizeSt] = useState(4);
+      const [to,     setTo]     = useState("");
+      const [from,   setFrom]   = useState("");
+      const [msg,    setMsg]    = useState("");
+      const [modal,  setModal]  = useState(null);
+      const [saving, setSaving] = useState(false);
+      const [copied, setCopied] = useState(false);
+
+      const canvasRef = useRef(null);
+      const colorRef  = useRef(null);
+      const drawing   = useDrawing(canvasRef);
+
+      useEffect(() => {
+        if (screen === "editor" && canvasRef.current) drawing.initCanvas();
+      }, [screen]);
+
+      const handleTool  = (t) => { setToolSt(t);  drawing.setTool(t);  };
+      const handleColor = (c) => { setColorSt(c); drawing.setColor(c); };
+      const handleSize  = (n) => { setSizeSt(n);  drawing.setSize(n);  };
+
+      const handleGenerate = async () => {
+        setSaving(true);
+        try {
+          const c = canvasRef.current;
+          const tmp = document.createElement("canvas");
+          tmp.width=c.width; tmp.height=c.height;
+          tmp.getContext("2d").drawImage(c,0,0);
+          const img = tmp.toDataURL("image/jpeg", 0.7);
+          const id  = await saveArt({ to:to||"Someone Special", from:from||"A Secret Admirer", msg, img });
+          const link= `${location.origin}${location.pathname}?id=${id}`;
+          setModal({ link, receiver:to||"Someone Special" });
+        } catch(e) {
+          alert("Could not save. Make sure your Supabase 'artworks' table exists with RLS policies.\n\n"+e.message);
+        }
+        setSaving(false);
+      };
+
+      const copyLink = () => {
+        const text = modal.link;
+        const done = () => { setCopied(true); setTimeout(()=>setCopied(false),2000); };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(done).catch(fb);
+        } else fb();
+        function fb() {
+          const ta=document.createElement("textarea"); ta.value=text;
+          ta.style.cssText="position:fixed;top:-9999px;opacity:0;";
+          document.body.appendChild(ta); ta.focus(); ta.select();
+          try{document.execCommand("copy");done();}catch(_){}
+          document.body.removeChild(ta);
+        }
+      };
+
+      const fieldStyle = {
+        width:"100%", padding:"10px 12px", border:"1.5px solid #d4cec4",
+        borderRadius:8, background:G.paper, color:G.ink,
+        fontFamily:"'DM Sans',sans-serif", fontSize:14, outline:"none", boxSizing:"border-box",
+      };
+      const tbtn = (t) => ({
+        width:44, height:44, borderRadius:10, border:"none",
+        background: tool===t ? G.rust : "transparent",
+        color: tool===t ? "#fff" : "#aaa",
+        cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center",
+        fontSize:19, transition:"all .15s",
+      });
+      const sbtn = (t) => ({
+        padding:"4px 12px", borderRadius:6,
+        border:`1.5px solid ${tool===t ? G.rust:"#c8c0b4"}`,
+        background: tool===t ? G.rust : "transparent",
+        color: tool===t ? "#fff" : G.ink,
+        fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif",
+      });
+
+      /* ── LANDING ── */
+      if (screen === "landing") return (
+        <div style={{minHeight:"100vh",background:G.ink,display:"flex",flexDirection:"column",
+          alignItems:"center",justifyContent:"center",textAlign:"center",padding:"40px 20px",
+          position:"relative",overflow:"hidden"}}>
+          {[300,500,700].map((s,i)=>(
+            <div key={i} style={{position:"absolute",width:s,height:s,borderRadius:"50%",
+              border:`1px solid rgba(201,150,58,${0.12-i*0.04})`,
+              top:"50%",left:"50%",transform:"translate(-50%,-50%)",pointerEvents:"none"}}/>
+          ))}
+          <p style={{fontSize:11,letterSpacing:4,textTransform:"uppercase",color:G.gold,marginBottom:20,position:"relative"}}>DrawMail</p>
+          <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:"clamp(40px,8vw,86px)",
+            color:G.paper,lineHeight:1.05,maxWidth:680,marginBottom:20,position:"relative"}}>
+            Send <em style={{color:G.rust}}>art,</em><br/>not just words.
+          </h1>
+          <p style={{fontSize:16,color:"#9a9090",maxWidth:420,lineHeight:1.7,marginBottom:36,position:"relative"}}>
+            Draw something beautiful. Write something meaningful.<br/>Share it with a short, clean link.
+          </p>
+          <button onClick={()=>setScreen("editor")}
+            style={{padding:"16px 44px",borderRadius:12,border:"none",background:G.rust,
+              color:"#fff",fontFamily:"'Playfair Display',serif",fontSize:18,fontStyle:"italic",
+              cursor:"pointer",letterSpacing:.5,boxShadow:"0 8px 24px rgba(192,71,43,.35)",
+              transition:"all .2s",position:"relative"}}>
+            Start Drawing →
+          </button>
+        </div>
+      );
+
+      /* ── EDITOR ── */
+      return (
+        <div style={{display:"flex",height:"100vh",overflow:"hidden",fontFamily:"'DM Sans',sans-serif"}}>
+
+          {/* Sidebar */}
+          <div style={{width:68,background:G.ink,display:"flex",flexDirection:"column",
+            alignItems:"center",padding:"14px 0",gap:6,flexShrink:0}}>
+            <span style={{fontFamily:"'Playfair Display',serif",color:G.gold,fontSize:10,
+              letterSpacing:2,textTransform:"uppercase",writingMode:"vertical-rl",
+              transform:"rotate(180deg)",marginBottom:14,opacity:.85}}>DrawMail</span>
+
+            {[["pen","✏️"],["eraser","🧹"]].map(([t,ic])=>(
+              <button key={t} title={t} style={tbtn(t)} onClick={()=>handleTool(t)}>{ic}</button>
+            ))}
+            <div style={{width:32,height:1,background:"#333",margin:"4px 0"}}/>
+            {[["rect","▭"],["circle","○"]].map(([t,ic])=>(
+              <button key={t} title={t} style={tbtn(t)} onClick={()=>handleTool(t)}>{ic}</button>
+            ))}
+            <div style={{width:32,height:1,background:"#333",margin:"4px 0"}}/>
+
+            <div title="Color" onClick={()=>colorRef.current?.click()}
+              style={{width:32,height:32,borderRadius:"50%",background:color,
+                border:"3px solid #444",cursor:"pointer",position:"relative"}}>
+              <input ref={colorRef} type="color" value={color}
+                onChange={e=>handleColor(e.target.value)}
+                style={{position:"absolute",opacity:0,inset:0,cursor:"pointer"}}/>
+            </div>
+
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,padding:"6px 0"}}>
+              <span style={{color:"#666",fontSize:9,letterSpacing:1,textTransform:"uppercase"}}>size</span>
+              <input type="range" min={1} max={40} value={size}
+                onChange={e=>handleSize(Number(e.target.value))}
+                style={{writingMode:"vertical-lr",direction:"rtl",width:6,height:76,
+                  WebkitAppearance:"slider-vertical",cursor:"pointer",accentColor:G.gold}}/>
+            </div>
+
+            <div style={{marginTop:"auto",display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+              <label title="Add Image" style={{width:44,height:44,borderRadius:10,border:"none",
+                background:"transparent",color:"#aaa",cursor:"pointer",display:"flex",
+                alignItems:"center",justifyContent:"center",fontSize:19}}>
+                🖼️
+                <input type="file" accept="image/*" style={{display:"none"}}
+                  onChange={e=>{if(e.target.files[0])drawing.addImage(e.target.files[0]);e.target.value="";}}/>
+              </label>
+              <button title="Undo (Ctrl+Z)" style={tbtn("__undo")} onClick={drawing.undo}>↩️</button>
+            </div>
+          </div>
+
+          {/* Canvas area */}
+          <div style={{flex:1,display:"flex",flexDirection:"column",background:"#e8e2d8",overflow:"hidden"}}>
+            <div style={{background:G.cream,borderBottom:"1px solid #d4cec4",
+              padding:"8px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <span style={{fontSize:11,color:G.muted,letterSpacing:1,textTransform:"uppercase"}}>Canvas</span>
+              {[["pen","Free Draw"],["rect","Rectangle"],["circle","Circle"]].map(([t,l])=>(
+                <button key={t} onClick={()=>handleTool(t)} style={sbtn(t)}>{l}</button>
+              ))}
+              <label style={{padding:"4px 14px",borderRadius:6,border:"1.5px dashed #c8c0b4",
+                background:"transparent",color:G.muted,fontSize:12,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>
+                📁 Add Image
+                <input type="file" accept="image/*" style={{display:"none"}}
+                  onChange={e=>{if(e.target.files[0])drawing.addImage(e.target.files[0]);e.target.value="";}}/>
+              </label>
+              <div style={{flex:1}}/>
+              <button onClick={drawing.clear} style={{padding:"4px 14px",borderRadius:6,
+                border:"1.5px solid #ddd",background:"transparent",color:G.muted,
+                fontSize:12,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>Clear All</button>
+            </div>
+
+            <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24,overflow:"hidden"}}>
+              <canvas ref={canvasRef} width={700} height={480}
+                style={{background:G.canvasBg,boxShadow:"0 8px 40px rgba(0,0,0,.18)",
+                  borderRadius:2,cursor:tool==="eraser"?"cell":"crosshair",
+                  maxWidth:"100%",maxHeight:"100%",display:"block"}}
+                onMouseDown={drawing.onDown} onMouseMove={drawing.onMove}
+                onMouseUp={drawing.onUp} onMouseLeave={drawing.onUp}
+                onTouchStart={e=>{e.preventDefault();drawing.onDown(e);}}
+                onTouchMove={e=>{e.preventDefault();drawing.onMove(e);}}
+                onTouchEnd={drawing.onUp}
+              />
+            </div>
+          </div>
+
+          {/* Right panel */}
+          <div style={{width:272,background:G.cream,borderLeft:"1px solid #d4cec4",
+            display:"flex",flexDirection:"column",padding:"24px 20px",gap:14,
+            overflowY:"auto",flexShrink:0}}>
+            <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontStyle:"italic",
+              borderBottom:"1px solid #d4cec4",paddingBottom:12}}>Your Message</h2>
+
+            {[["To",to,setTo,"Receiver's name…"],["From",from,setFrom,"Your name…"]].map(([lbl,val,setter,ph])=>(
+              <div key={lbl}>
+                <span style={{fontSize:11,letterSpacing:1.5,textTransform:"uppercase",
+                  color:G.muted,marginBottom:6,display:"block"}}>{lbl}</span>
+                <input value={val} onChange={e=>setter(e.target.value)} placeholder={ph} style={fieldStyle}
+                  onFocus={e=>e.target.style.borderColor=G.rust}
+                  onBlur={e=>e.target.style.borderColor="#d4cec4"}/>
+              </div>
+            ))}
+
+            <div>
+              <span style={{fontSize:11,letterSpacing:1.5,textTransform:"uppercase",
+                color:G.muted,marginBottom:6,display:"block"}}>Message</span>
+              <textarea value={msg} onChange={e=>setMsg(e.target.value)}
+                placeholder="Write something heartfelt…"
+                style={{...fieldStyle,resize:"vertical",minHeight:90,lineHeight:1.5}}
+                onFocus={e=>e.target.style.borderColor=G.rust}
+                onBlur={e=>e.target.style.borderColor="#d4cec4"}/>
+            </div>
+
+            <button onClick={handleGenerate} disabled={saving}
+              style={{width:"100%",padding:14,borderRadius:10,border:"none",
+                background:saving?G.muted:G.rust,color:"#fff",
+                fontFamily:"'Playfair Display',serif",fontSize:16,fontStyle:"italic",
+                cursor:saving?"wait":"pointer",letterSpacing:.5,marginTop:4,transition:"all .2s"}}>
+              {saving ? "Saving…" : "Generate Share Link ✦"}
+            </button>
+
+            <p style={{fontSize:11,color:G.muted,lineHeight:1.6,textAlign:"center"}}>
+              Your drawing is saved to the cloud. Recipient gets a short link — no app needed.
+            </p>
+          </div>
+
+          {/* Share Modal */}
+          {modal && (
+            <div onClick={e=>{if(e.target===e.currentTarget)setModal(null);}}
+              style={{position:"fixed",inset:0,background:"rgba(26,17,24,.75)",
+                backdropFilter:"blur(4px)",display:"flex",alignItems:"center",
+                justifyContent:"center",zIndex:100}}>
+              <div style={{background:G.paper,borderRadius:16,padding:32,maxWidth:440,
+                width:"90%",boxShadow:"0 24px 80px rgba(0,0,0,.35)",position:"relative",
+                fontFamily:"'DM Sans',sans-serif"}}>
+                <button onClick={()=>setModal(null)} style={{position:"absolute",top:16,right:16,
+                  background:"none",border:"none",fontSize:22,cursor:"pointer",color:G.muted}}>×</button>
+                <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:24,marginBottom:8}}>
+                  Your link is ready ✦
+                </h2>
+                <p style={{color:G.muted,fontSize:13,marginBottom:20,lineHeight:1.6}}>
+                  Share this with <strong>{modal.receiver}</strong>. They'll see your drawing and message when they open it.
+                </p>
+                <div style={{display:"flex",gap:8,alignItems:"center",background:G.cream,
+                  border:"1.5px solid #d4cec4",borderRadius:10,padding:"10px 12px",marginBottom:12}}>
+                  <span style={{flex:1,fontSize:13,color:G.ink,fontFamily:"monospace",wordBreak:"break-all"}}>
+                    {modal.link}
+                  </span>
+                  <button onClick={copyLink} style={{padding:"8px 16px",borderRadius:6,border:"none",
+                    background:copied?G.sage:G.ink,color:"#fff",fontSize:12,cursor:"pointer",
+                    whiteSpace:"nowrap",fontFamily:"'DM Sans',sans-serif",transition:"background .2s"}}>
+                    {copied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+                <p style={{fontSize:11,color:G.muted,textAlign:"center"}}>
+                  Short link — no login required for the recipient.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ══════════════════════════════════════════
+       VIEW PAGE
+    ══════════════════════════════════════════ */
+    function ViewPage({ artId }) {
+      const [art, setArt] = useState(null);
+      const [err, setErr] = useState(false);
+
+      useEffect(() => {
+        loadArt(artId).then(d => d ? setArt(d) : setErr(true)).catch(()=>setErr(true));
+      }, [artId]);
+
+      const goCreate = () => { window.location.href = window.location.origin + window.location.pathname; };
+
+      if (err) return (
+        <div style={{minHeight:"100vh",background:G.ink,display:"flex",alignItems:"center",
+          justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'Playfair Display',serif",color:G.paper}}>
+          <span style={{fontSize:48}}>🎨</span>
+          <p style={{fontSize:22,fontStyle:"italic"}}>This artwork couldn't be found.</p>
+          <button onClick={goCreate} style={{padding:"10px 28px",borderRadius:8,
+            border:`1.5px solid ${G.rust}`,background:"transparent",color:G.rust,
+            fontSize:14,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>Create your own</button>
+        </div>
+      );
+
+      if (!art) return (
+        <div style={{minHeight:"100vh",background:G.ink,display:"flex",alignItems:"center",
+          justifyContent:"center",fontFamily:"'Playfair Display',serif",color:G.muted,fontSize:18,fontStyle:"italic"}}>
+          Loading your artwork…
+        </div>
+      );
+
+      return (
+        <div style={{minHeight:"100vh",background:G.ink,display:"flex",alignItems:"center",
+          justifyContent:"center",padding:"40px 20px",fontFamily:"'DM Sans',sans-serif"}}>
+          <div style={{background:G.paper,borderRadius:4,maxWidth:680,width:"100%",
+            boxShadow:"0 20px 80px rgba(0,0,0,.5)",overflow:"hidden"}}>
+
+            <div style={{padding:"28px 32px 16px",borderBottom:"1px solid #e2dbd0",
+              display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
+              <div>
+                <p style={{fontSize:11,letterSpacing:2,textTransform:"uppercase",color:G.muted}}>A drawing for</p>
+                <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:28,marginTop:2}}>{art.to}</h2>
+                <p style={{fontSize:12,color:G.muted,marginTop:4}}>from <strong>{art.from}</strong></p>
+              </div>
+              <div style={{fontFamily:"'Playfair Display',serif",fontSize:10,color:G.rust,
+                border:`2px solid ${G.rust}`,padding:"6px 10px",letterSpacing:1.5,
+                textTransform:"uppercase",opacity:.7,transform:"rotate(3deg)",marginTop:4}}>
+                DrawMail
+              </div>
+            </div>
+
+            <div style={{padding:"20px 32px",background:"#f0ece3",display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <img src={art.img} alt="Drawing" style={{maxWidth:"100%",borderRadius:2,
+                boxShadow:"0 2px 16px rgba(0,0,0,.12)",display:"block"}}/>
+            </div>
+
+            {art.msg && (
+              <div style={{padding:"24px 32px"}}>
+                <p style={{fontSize:10,letterSpacing:2,textTransform:"uppercase",color:G.muted,marginBottom:10}}>A message</p>
+                <p style={{fontFamily:"'Playfair Display',serif",fontSize:18,fontStyle:"italic",
+                  lineHeight:1.7,whiteSpace:"pre-wrap"}}>{art.msg}</p>
+              </div>
+            )}
+
+            <div style={{padding:"16px 32px",background:G.cream,borderTop:"1px solid #e2dbd0",
+              display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
+              <span style={{fontFamily:"'Playfair Display',serif",fontSize:13,fontStyle:"italic",color:G.muted}}>
+                DrawMail — Send art, not just words.
+              </span>
+              <button onClick={goCreate}
+                onMouseOver={e=>{e.target.style.background=G.rust;e.target.style.color="#fff";}}
+                onMouseOut={e=>{e.target.style.background="transparent";e.target.style.color=G.rust;}}
+                style={{padding:"8px 20px",borderRadius:8,border:`1.5px solid ${G.rust}`,
+                  background:"transparent",color:G.rust,fontSize:13,cursor:"pointer",
+                  fontFamily:"'DM Sans',sans-serif",transition:"all .15s"}}>
+                Reply with Art →
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ══ Mount ══ */
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
